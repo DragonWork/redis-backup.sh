@@ -52,7 +52,7 @@ mkdir -p "$BACKUP_DIR"
 echo "     ***** redis-backup.sh $VERSION (using $REDIS_CLI_NAME) for $REDIS_NAME *****"
 
 timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
-dest="$BACKUP_DIR/dump-$timestamp.rdb"
+dest="$BACKUP_DIR/dump-$timestamp.rdb.zst"
 
 echo "Starting $REDIS_NAME backup at $(date)"
 
@@ -92,12 +92,9 @@ if [[ "$lastsave_after" -le "$lastsave_before" ]]; then
 fi
 
 echo "BGSAVE completed successfully"
-echo "Copying dump.rdb → $dest"
+echo "Copying and compressing dump.rdb → $dest"
 
-cp "$RDB_FILE" "$dest"
-
-echo "Compressing..."
-zstd -T0 -6 --rm "$dest" 2>&1
+( umask 077 && zstd -T0 -6 -c "$RDB_FILE" > "$dest" )
 
 echo "Backup finished successfully"
 
