@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="v0.2"
+VERSION="v0.3"
 
 RETENTION=24 # default, configure with "--keep N"
 
@@ -62,7 +62,7 @@ echo "                                                            by DragonWork"
 echo ""
 
 # required tools
-for cmd in xargs awk zstd; do
+for cmd in xargs awk cp od tr; do
   command -v "$cmd" > /dev/null 2>&1 || {
     echo "Missing dependency: $cmd" >&2
     exit 1
@@ -138,14 +138,45 @@ if [[ "$lastsave_after" -le "$lastsave_before" ]]; then
 fi
 
 echo "BGSAVE completed successfully"
-echo "Copying and compressing dump.rdb → $dest"
 
-(umask 077 && zstd -T0 -6 -c "$RDB_FILE" > "$dest")
+(
+  umask 077
+  # Pin this snapshot even if another BGSAVE replaces the RDB during the copy.
+  exec {rdb_fd}< "$RDB_FILE"
+  rdb_source="/proc/self/fd/$rdb_fd"
+
+  # Valkey VCS v1: codec 2 (zstd), reserved 0, stream kind 1 (RDB),
+  # followed by the zstd frame magic. Probe only 11 bytes, without decompression.
+  header=$(od -An -tx1 -N 11 "$rdb_source" | tr -d '[:space:]')
+  case "$header" in
+    5643530102000128b52ffd)
+      # Preserve Valkey's envelope; this is a native RDB, not a standalone .zst.
+      dest="${dest%.zst}"
+      echo "RDB already uses Valkey zstd compression; copying → $dest"
+      cp --reflink=auto "$rdb_source" "$dest"
+      ;;
+    28b52ffd*)
+      echo "RDB is already a zstd stream; copying → $dest"
+      cp --reflink=auto "$rdb_source" "$dest"
+      ;;
+    *)
+      command -v zstd > /dev/null 2>&1 || {
+        echo "Missing dependency: zstd (needed for uncompressed RDB backups)" >&2
+        exit 1
+      }
+      echo "Copying and compressing dump.rdb → $dest"
+      zstd -T0 -c <&"$rdb_fd" > "$dest"
+      ;;
+  esac
+)
 
 echo "Backup finished successfully"
 
 # Retention: keep newest $RETENTION backups
-old=$(ls -1t "$BACKUP_DIR"/dump-*.rdb.zst 2> /dev/null | tail -n +$((RETENTION + 1)))
+old=$(
+  shopt -s nullglob
+  ls -1t "$BACKUP_DIR"/dump-*.rdb "$BACKUP_DIR"/dump-*.rdb.zst | tail -n +$((RETENTION + 1))
+)
 
 if [ -n "$old" ]; then
   count=$(echo "$old" | wc -l)
